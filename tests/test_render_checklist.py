@@ -96,6 +96,51 @@ class ChecklistTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "非空"):
             renderer.validate(data)
 
+    def test_accepts_standard_solution_titles(self):
+        for odm_title in ("ODM/OEM解决方案 (ODM/OEM Solutions)",
+                          "ODM/OEM 解决方案 (ODM/OEM Solutions)"):
+            data = fixture()
+            next(p for p in data["paragraphs"] if p["text"].startswith("3.1 "))["text"] = (
+                f"3.1 {odm_title}")
+            with self.subTest(title=odm_title):
+                self.assertEqual(renderer.validate(data), data["paragraphs"])
+
+    def test_rejects_custom_solution_titles(self):
+        for number, title in (
+            ("3.1", "定制解决方案 (Custom Solutions)"),
+            ("3.1", "ODM/OEM 技术支持 (ODM/OEM Solutions)"),
+            ("3.1", "ODM/OEM 解决方案 (Custom Solutions)"),
+            ("3.2", "应用解决方案 (Application Solutions)"),
+            ("3.2", "行业解决方案 (Application Solutions)"),
+        ):
+            data = fixture()
+            next(p for p in data["paragraphs"] if p["text"].startswith(number + " "))["text"] = (
+                f"{number} {title}")
+            with self.subTest(number=number, title=title), self.assertRaisesRegex(
+                ValueError, f"标题 {number.replace('.', r'[.]')} 必须是"
+            ):
+                renderer.validate(data)
+
+    def test_rejects_extra_peer_sections(self):
+        for chapter, last_section, next_chapter in (
+            (1, 4, 2), (3, 3, 4), (3, 4, 4),
+            (4, 3, 5), (4, 4, 5), (5, 3, 6), (6, 1, 7), (7, 1, None),
+        ):
+            data = fixture()
+            paragraphs = data["paragraphs"]
+            index = next((i for i, p in enumerate(paragraphs)
+                          if next_chapter is not None and p["text"].startswith(f"{next_chapter}. ")),
+                         len(paragraphs))
+            first_extra = 4 if chapter == 1 else 1 if chapter in (6, 7) else 3
+            paragraphs[index:index] = [
+                {"kind": "heading", "text": f"{chapter}.{n} 附加主题 (Extra Topic)"}
+                for n in range(first_extra, last_section + 1)
+            ]
+            with self.subTest(chapter=chapter, last_section=last_section), self.assertRaisesRegex(
+                ValueError, "模板不允许额外的二级标题"
+            ):
+                renderer.validate(data)
+
     def test_rejects_number_gap_and_wrong_product_name(self):
         data = fixture()
         for p in data["paragraphs"]:

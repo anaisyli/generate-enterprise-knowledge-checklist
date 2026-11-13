@@ -83,6 +83,20 @@ def validate(data):
     if any(key[0] > 7 for key in headings):
         raise ValueError("只能包含 1 至 7 七个一级章节。")
 
+    allowed_sections = {1: 3, 3: 2, 4: 2, 5: 2, 6: 0, 7: 0}
+    for key in headings:
+        if len(key) == 2 and key[0] != 2 and key[1] > allowed_sections[key[0]]:
+            raise ValueError(f"模板不允许额外的二级标题 {key[0]}.{key[1]}。")
+    solution_titles = {
+        (3, 1): (r"ODM/OEM\s*解决方案\s*\(ODM/OEM Solutions\)",
+                 "ODM/OEM 解决方案 (ODM/OEM Solutions)"),
+        (3, 2): (r"行业解决方案\s*\(Industry Solutions\)",
+                 "行业解决方案 (Industry Solutions)"),
+    }
+    for key, (pattern, title) in solution_titles.items():
+        if not re.fullmatch(pattern, headings[key][1]):
+            raise ValueError(f"标题 {key[0]}.{key[1]} 必须是：{title}")
+
     for n, category in enumerate(categories, 1):
         key = (2, n)
         expected = f"产品大类{n}：{category}"
