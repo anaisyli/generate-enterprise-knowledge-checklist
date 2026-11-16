@@ -223,6 +223,69 @@ class ChecklistTests(unittest.TestCase):
             self.assertNotEqual(run.returncode, 0)
             self.assertFalse(out.exists())
 
+    def test_style_warnings_fixture_has_no_style_warnings(self):
+        paragraphs = renderer.validate(fixture())
+        joined = "\n".join(renderer.style_warnings(paragraphs))
+        self.assertIn("篇幅明显少于", joined)
+        self.assertNotIn("超过 6000", joined)
+        self.assertNotIn("限制性表述", joined)
+        self.assertNotIn("Title Case", joined)
+
+    def test_style_warnings_title_case(self):
+        bad = [
+            {"kind": "heading", "text": "2.1 产品大类1：分拣线 (Sorting line)"},
+            {"kind": "label", "text": "产品概述 (product overview)："},
+        ]
+        warnings = "\n".join(renderer.style_warnings(bad))
+        self.assertIn("Title Case", warnings)
+        self.assertIn("Sorting line", warnings)
+        self.assertIn("product overview", warnings)
+
+        for english in (
+            "Packaging, Logistics and After-Sales Documents",
+            "R&D, Manufacturing and Integration Documents",
+            "High-Efficiency Circular Sorting Line for Large-Capacity Package",
+        ):
+            with self.subTest(english=english):
+                paragraphs = [{"kind": "heading", "text": f"4.1 案例 ({english})"}]
+                self.assertNotIn("Title Case", "\n".join(renderer.style_warnings(paragraphs)))
+
+        for english in ("High-efficiency Circular Sorting Line",
+                        "the Best Practices"):
+            with self.subTest(english=english):
+                paragraphs = [{"kind": "heading", "text": f"4.1 案例 ({english})"}]
+                self.assertIn("Title Case", "\n".join(renderer.style_warnings(paragraphs)))
+
+    def test_style_warnings_restriction_density(self):
+        for count, expected in ((6, False), (7, True)):
+            with self.subTest(count=count):
+                paragraphs = [{"kind": "text", "text": f"第{i}段包含脱敏处理说明。"}
+                              for i in range(count)]
+                joined = "\n".join(renderer.style_warnings(paragraphs))
+                self.assertEqual("限制性表述" in joined, expected)
+
+    def test_style_warnings_length_boundaries(self):
+        for size, expected in ((6000, False), (6001, True)):
+            with self.subTest(size=size):
+                paragraphs = [{"kind": "text", "text": "汉" * size}]
+                joined = "\n".join(renderer.style_warnings(paragraphs))
+                self.assertEqual("超过 6000" in joined, expected)
+                self.assertNotIn("篇幅明显少于", joined)
+
+    def test_over_length_export_succeeds_with_warning(self):
+        data = fixture()
+        next(p for p in data["paragraphs"] if p["kind"] == "text")["text"] = (
+            "请提供详细资料。" + "补充说明。" * 1400)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, out = root / "input.json", root / "result.docx"
+            source.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            run = subprocess.run([sys.executable, str(SCRIPT), str(source), str(out)],
+                                 capture_output=True, text=True, encoding="utf-8", env=SUBPROCESS_ENV)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertIn("超过 6000", run.stdout)
+            self.assertTrue(out.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

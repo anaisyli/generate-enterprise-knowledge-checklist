@@ -22,6 +22,11 @@ PRODUCT_LABELS = (
 )
 HEADING = re.compile(r"^(\d+(?:\.\d+)*)(?:\.\s+|\s+)(\S.*)$")
 INVALID_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff\ud800-\udfff]")
+RESTRICTION = re.compile(r"不提交|无需提交|不提供|无需提供|脱敏|公开授权|获准公开|批准公开|获授权")
+MAX_RESTRICTION_PARAGRAPHS = 6
+SMALL_WORDS = {"a", "an", "and", "as", "at", "but", "by", "for", "from", "in",
+               "into", "of", "on", "or", "per", "the", "to", "via", "vs",
+               "with", "without"}
 
 
 def _strings(value, name):
@@ -153,6 +158,47 @@ def word_count(paragraphs):
     return len(re.findall(r"[\u3400-\u9fff]", text)) + len(re.findall(r"[A-Za-z]+(?:[-'][A-Za-z]+)*", text))
 
 
+def _title_case_violation(text):
+    parens = re.findall(r"\([^()]*\)", text)
+    if not parens:
+        return False
+    for i, word in enumerate(parens[-1][1:-1].split()):
+        for j, segment in enumerate(word.split("-")):
+            if not segment or not "a" <= segment[0] <= "z":
+                continue
+            if i == 0 and j == 0:
+                return True
+            if segment.lower() not in SMALL_WORDS:
+                return True
+    return False
+
+
+def style_warnings(paragraphs):
+    warnings = []
+    count = word_count(paragraphs)
+    if count > 6000:
+        warnings.append(
+            f"警告：篇幅超过 6000 字上限（当前 {count}）；请压缩各要点表述，优先删除重复限定语，不要删减模板主题。")
+    elif count < 4500:
+        warnings.append(
+            f"警告：篇幅明显少于约 6000 字目标（当前 {count}）；请确认各板块未过于空泛，不要虚构内容凑字。")
+    restricted = sum(1 for p in paragraphs
+                     if p["kind"] == "text" and RESTRICTION.search(p["text"]))
+    if restricted > MAX_RESTRICTION_PARAGRAPHS:
+        warnings.append(
+            f"警告：{restricted} 个正文段落包含限制性表述（上限 {MAX_RESTRICTION_PARAGRAPHS}）；"
+            "公开资料边界应集中在开头说明及案例、技术接口、认证等必要位置，其余段落只写需要提供的资料。")
+    bad_titles = []
+    for p in paragraphs:
+        if p["kind"] in {"heading", "label"} and _title_case_violation(p["text"]):
+            if p["text"] not in bad_titles:
+                bad_titles.append(p["text"])
+    if bad_titles:
+        warnings.append("警告：以下标题英文未使用 Title Case：\n"
+                        + "\n".join(f"  - {text}" for text in bad_titles))
+    return warnings
+
+
 def _paragraph(p):
     styles = {"title": "Title", "heading": "Heading", "label": "Label"}
     kind, text = p["kind"], p["text"]
@@ -228,8 +274,8 @@ def main(argv=None):
     count = word_count(paragraphs)
     print(f"已生成：{args.output}")
     print(f"近似字数（中文字符 + 英文单词，含标题和提示）：{count}")
-    if not 5000 <= count <= 7000:
-        print("警告：篇幅偏离约 6000 字目标；请结合实际产品数量和参考模板人工检查，不要虚构内容凑字。")
+    for warning in style_warnings(paragraphs):
+        print(warning)
     print("请人工复核行业准确性、英文、公司名、蓝色提示及页面排版。")
     return 0
 
