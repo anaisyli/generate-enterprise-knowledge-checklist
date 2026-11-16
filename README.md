@@ -30,7 +30,7 @@
 - `SKILL.md`：触发条件和执行流程。
 - `references\workflow.md`：模板规则、蓝字、审核及稿件格式。
 - `assets\templates\`：五份去除具体产品型号和文档作者信息的行业参考模板；体外诊断模板是默认主参考。
-- `scripts\render_checklist.py`：校验结构、输出无表格 Word，保留蓝字。
+- `scripts\render_checklist.py`：校验结构、输出无表格 Word，保留蓝字；标题按模板使用 Word 内置标题 1–4（文档标题、`1.`、`1.1`、`2.1.1`），宋体加粗，导航窗格可见；第 6 章示例问题为自动编号列表。
 - `tests\test_render_checklist.py`：生成器的结构与导出测试。
 
 ## 使用生成器

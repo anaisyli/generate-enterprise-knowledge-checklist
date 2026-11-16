@@ -27,6 +27,7 @@ MAX_RESTRICTION_PARAGRAPHS = 6
 SMALL_WORDS = {"a", "an", "and", "as", "at", "but", "by", "for", "from", "in",
                "into", "of", "on", "or", "per", "the", "to", "via", "vs",
                "with", "without"}
+LIST_NUMBER = re.compile(r"^\s*(?:\d+[.、)）]|[（(]\d+[)）])")
 
 
 def _strings(value, name):
@@ -48,13 +49,15 @@ def validate(data):
     if not isinstance(paragraphs, list) or not paragraphs:
         raise ValueError("paragraphs 必须是非空数组。")
     for i, p in enumerate(paragraphs):
-        if not isinstance(p, dict) or p.get("kind") not in {"title", "heading", "label", "text", "blue"}:
+        if not isinstance(p, dict) or p.get("kind") not in {"title", "heading", "label", "text", "blue", "list"}:
             raise ValueError(f"第 {i + 1} 段的 kind 无效。")
         text = p.get("text")
         if not isinstance(text, str) or not text.strip() or text != text.strip():
             raise ValueError(f"第 {i + 1} 段的 text 必须为非空且首尾无空白的字符串。")
         if INVALID_XML.search(text) or "\n" in text or "\r" in text:
             raise ValueError(f"第 {i + 1} 段包含 XML 无效字符或换行，请拆成独立段落。")
+        if p["kind"] == "list" and LIST_NUMBER.match(text):
+            raise ValueError("编号列表项不要手写编号。")
     if paragraphs[0]["kind"] != "title" or sum(p["kind"] == "title" for p in paragraphs) != 1:
         raise ValueError("必须仅有一个 title，且位于第一段。")
     if len(paragraphs) < 2 or paragraphs[1] != {"kind": "blue", "text": BLUE_INTRO}:
@@ -150,6 +153,18 @@ def validate(data):
     actual_blue_positions = {i: p["text"] for i, p in enumerate(paragraphs) if p["kind"] == "blue"}
     if actual_blue_positions != expected_blue_positions:
         raise ValueError("蓝色提示的内容、位置或数量有误。")
+
+    six_start = headings[(6,)][0]
+    seven_start = headings[(7,)][0]
+    list_indices = [i for i, p in enumerate(paragraphs) if p["kind"] == "list"]
+    if any(i <= six_start or i >= seven_start for i in list_indices):
+        raise ValueError("编号列表只能用于第 6 章示例问题。")
+    if any(p["kind"] == "label" for p in paragraphs[six_start + 1:seven_start]):
+        raise ValueError("第 6 章示例问题请使用 list，不使用资料要点标题。")
+    chapter_lists = [i for i in list_indices if six_start < i < seven_start]
+    if (len(chapter_lists) != 7
+            or chapter_lists != list(range(chapter_lists[0], chapter_lists[0] + 7))):
+        raise ValueError("第 6 章须包含 7 个连续的示例问题编号列表。")
     return paragraphs
 
 
@@ -200,14 +215,29 @@ def style_warnings(paragraphs):
 
 
 def _paragraph(p):
-    styles = {"title": "Title", "heading": "Heading", "label": "Label"}
     kind, text = p["kind"], p["text"]
-    style = styles.get(kind)
-    if kind == "heading":
-        match = HEADING.fullmatch(text)
-        style += str(len(match.group(1).split(".")))
+    if kind == "list":
+        return ('<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>'
+                '<w:spacing w:before="0" w:beforeAutospacing="1" w:after="0" w:afterAutospacing="1"/>'
+                '<w:ind w:left="360" w:hanging="360"/></w:pPr>'
+                f'<w:r><w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:p>')
+    if kind == "title":
+        style = "Heading1"
+    elif kind == "heading":
+        depth = len(HEADING.fullmatch(text).group(1).split("."))
+        style = f"Heading{depth + 1}"
+    elif kind in {"label", "text"}:
+        style = "NormalWeb"
+    else:
+        style = None
     ppr = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
-    rpr = '<w:rPr><w:color w:val="0000FF"/></w:rPr>' if kind == "blue" else ""
+    if kind == "label":
+        rpr = '<w:rPr><w:rStyle w:val="Strong"/></w:rPr>'
+    elif kind == "blue":
+        rpr = ('<w:rPr><w:rFonts w:ascii="宋体" w:hAnsi="宋体" w:eastAsia="宋体" w:cs="宋体"/>'
+               '<w:b/><w:bCs/><w:color w:val="0000FF"/></w:rPr>')
+    else:
+        rpr = ""
     return f'<w:p>{ppr}<w:r>{rpr}<w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:p>'
 
 
@@ -217,25 +247,52 @@ def render(paragraphs):
                 f'<w:document {ns}><w:body>'
                 + "".join(_paragraph(p) for p in paragraphs)
                 + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
-                  '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>'
+                  '<w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800"/>'
                   '</w:sectPr></w:body></w:document>')
+    heading_styles = "".join(
+        f'<w:style w:type="paragraph" w:styleId="Heading{level}">'
+        f'<w:name w:val="heading {level}"/>'
+        '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>'
+        '<w:pPr><w:keepNext/>'
+        '<w:spacing w:before="0" w:beforeAutospacing="1" w:after="0" w:afterAutospacing="1"/>'
+        '<w:jc w:val="left"/>'
+        f'<w:outlineLvl w:val="{level - 1}"/></w:pPr>'
+        '<w:rPr><w:rFonts w:ascii="宋体" w:hAnsi="宋体" w:eastAsia="宋体" w:cs="宋体"/>'
+        '<w:b/><w:bCs/>'
+        f'<w:sz w:val="{size}"/><w:szCs w:val="{size}"/></w:rPr></w:style>'
+        for level, size in ((1, 48), (2, 36), (3, 27), (4, 24)))
     styles = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
               f'<w:styles {ns}>'
+              '<w:docDefaults><w:rPrDefault><w:rPr>'
+              '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体" w:cs="Times New Roman"/>'
+              '</w:rPr></w:rPrDefault></w:docDefaults>'
               '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>'
-              '<w:rPr><w:rFonts w:ascii="Calibri" w:eastAsia="Microsoft YaHei"/>'
-              '<w:sz w:val="22"/></w:rPr><w:pPr><w:spacing w:after="120"/></w:pPr></w:style>'
-              + "".join(
-                  f'<w:style w:type="paragraph" w:styleId="{name}"><w:name w:val="{name}"/>'
-                  f'<w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="{size}"/></w:rPr></w:style>'
-                  for name, size in (("Title", 34), ("Heading1", 30), ("Heading2", 26),
-                                     ("Heading3", 24), ("Label", 22))
-              ) + '</w:styles>')
+              '<w:pPr><w:jc w:val="both"/></w:pPr>'
+              '<w:rPr><w:sz w:val="21"/><w:szCs w:val="21"/></w:rPr></w:style>'
+              + heading_styles
+              + '<w:style w:type="paragraph" w:styleId="NormalWeb"><w:name w:val="Normal (Web)"/>'
+                '<w:basedOn w:val="Normal"/>'
+                '<w:pPr><w:spacing w:before="0" w:beforeAutospacing="1" w:after="0" w:afterAutospacing="1"/>'
+                '<w:jc w:val="left"/></w:pPr>'
+                '<w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>'
+              + '<w:style w:type="character" w:styleId="Strong"><w:name w:val="Strong"/>'
+                '<w:rPr><w:b/><w:bCs/></w:rPr></w:style>'
+              + '</w:styles>')
+    numbering = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                 f'<w:numbering {ns}>'
+                 '<w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="singleLevel"/>'
+                 '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
+                 '<w:lvlText w:val="%1."/><w:lvlJc w:val="left"/>'
+                 '<w:pPr><w:ind w:left="360" w:hanging="360"/></w:pPr>'
+                 '<w:rPr><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:lvl></w:abstractNum>'
+                 '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>')
     content_types = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
                      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
                      '<Default Extension="xml" ContentType="application/xml"/>'
                      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
                      '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+                     '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>'
                      '</Types>')
     root_rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -244,11 +301,13 @@ def render(paragraphs):
     doc_rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                 '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
                 '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+                '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>'
                 '</Relationships>')
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as z:
         for name, content in (("[Content_Types].xml", content_types), ("_rels/.rels", root_rels),
                               ("word/document.xml", document), ("word/styles.xml", styles),
+                              ("word/numbering.xml", numbering),
                               ("word/_rels/document.xml.rels", doc_rels)):
             z.writestr(name, content.encode("utf-8"))
     return buffer.getvalue()

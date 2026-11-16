@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -50,8 +51,13 @@ def fixture(sub_count=6):
         heading(text)
     add("blue", renderer.BLUE_TRENDS)
     for text in ("5.1 技术趋势 (Technology Trends)", "5.2 市场趋势 (Market Trends)",
-                 "6. 常见问题 (FAQ)", "7. 其他相关文件 (Other Documents)"):
+                 "6. 常见问题 (FAQ)"):
         heading(text)
+    add("text", "请提供真实客户常问问题及正式回答。")
+    add("text", "【示例问题】")
+    for i in range(1, 8):
+        add("list", f"示例问题{i}？")
+    heading("7. 其他相关文件 (Other Documents)")
     return {"product_categories": categories, "first_category_subcategories": subs,
             "paragraphs": paragraphs}
 
@@ -285,6 +291,181 @@ class ChecklistTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertIn("超过 6000", run.stdout)
             self.assertTrue(out.exists())
+
+    def test_render_uses_word_heading_levels(self):
+        paragraphs = renderer.validate(fixture())
+        with zipfile.ZipFile(io.BytesIO(renderer.render(paragraphs))) as z:
+            xml = ET.fromstring(z.read("word/document.xml"))
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        w = "{%s}" % ns["w"]
+        body_ps = xml.findall(".//w:body/w:p", ns)
+        self.assertEqual(len(body_ps), len(paragraphs))
+        pstyles = {}
+        for p_el, p in zip(body_ps, paragraphs):
+            pstyle = p_el.find("w:pPr/w:pStyle", ns)
+            actual = pstyle.get(w + "val") if pstyle is not None else None
+            if p["kind"] == "title":
+                expected = "Heading1"
+            elif p["kind"] == "heading":
+                depth = len(renderer.HEADING.fullmatch(p["text"]).group(1).split("."))
+                expected = f"Heading{depth + 1}"
+            elif p["kind"] in {"label", "text"}:
+                expected = "NormalWeb"
+            else:
+                expected = None
+            self.assertEqual(actual, expected)
+            pstyles.setdefault(p["text"], actual)
+            rpr = p_el.find("w:r/w:rPr", ns)
+            if p["kind"] == "label":
+                self.assertEqual(rpr.find("w:rStyle", ns).get(w + "val"), "Strong")
+            elif p["kind"] == "blue":
+                self.assertEqual(rpr.find("w:color", ns).get(w + "val"), "0000FF")
+                self.assertIsNotNone(rpr.find("w:b", ns))
+                self.assertEqual(rpr.find("w:rFonts", ns).get(w + "eastAsia"), "宋体")
+            elif p["kind"] == "text":
+                self.assertIsNone(rpr)
+        for text, expected in {
+            "物流设备行业知识库清单": "Heading1",
+            "1. 公司介绍 (Company Profile)": "Heading2",
+            "1.1 公司简介 (Company Overview)": "Heading3",
+            "2.1 产品大类1：分拣机 (Sorters)": "Heading3",
+            "2.1.1 小类1 (Type 1)": "Heading4",
+        }.items():
+            self.assertEqual(pstyles[text], expected)
+        pgmar = xml.find(".//w:sectPr/w:pgMar", ns)
+        self.assertEqual(pgmar.get(w + "right"), "1800")
+        self.assertEqual(pgmar.get(w + "left"), "1800")
+
+    def test_styles_xml_defines_word_heading_styles(self):
+        paragraphs = renderer.validate(fixture())
+        with zipfile.ZipFile(io.BytesIO(renderer.render(paragraphs))) as z:
+            styles_xml = ET.fromstring(z.read("word/styles.xml"))
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        w = "{%s}" % ns["w"]
+        self.assertEqual(len(styles_xml.findall("w:style", ns)), 7)
+        fonts = styles_xml.find("w:docDefaults/w:rPrDefault/w:rPr/w:rFonts", ns)
+        for attr, expected in (("ascii", "Times New Roman"), ("hAnsi", "Times New Roman"),
+                               ("eastAsia", "宋体"), ("cs", "Times New Roman")):
+            self.assertEqual(fonts.get(w + attr), expected)
+        styles = {s.get(w + "styleId"): s for s in styles_xml.findall("w:style", ns)}
+        normal = styles["Normal"]
+        self.assertEqual(normal.get(w + "default"), "1")
+        self.assertEqual(normal.find("w:name", ns).get(w + "val"), "Normal")
+        self.assertEqual(normal.find("w:pPr/w:jc", ns).get(w + "val"), "both")
+        self.assertEqual(normal.find("w:rPr/w:sz", ns).get(w + "val"), "21")
+        self.assertEqual(normal.find("w:rPr/w:szCs", ns).get(w + "val"), "21")
+        for level, size in ((1, "48"), (2, "36"), (3, "27"), (4, "24")):
+            style = styles[f"Heading{level}"]
+            self.assertEqual(style.get(w + "type"), "paragraph")
+            self.assertEqual(style.find("w:name", ns).get(w + "val"), f"heading {level}")
+            self.assertEqual(style.find("w:basedOn", ns).get(w + "val"), "Normal")
+            self.assertEqual(style.find("w:next", ns).get(w + "val"), "Normal")
+            self.assertIsNotNone(style.find("w:qFormat", ns))
+            self.assertIsNotNone(style.find("w:pPr/w:keepNext", ns))
+            self.assertEqual(style.find("w:pPr/w:outlineLvl", ns).get(w + "val"),
+                             str(level - 1))
+            rfonts = style.find("w:rPr/w:rFonts", ns)
+            for attr in ("ascii", "hAnsi", "eastAsia", "cs"):
+                self.assertEqual(rfonts.get(w + attr), "宋体")
+            self.assertIsNotNone(style.find("w:rPr/w:b", ns))
+            self.assertIsNotNone(style.find("w:rPr/w:bCs", ns))
+            self.assertEqual(style.find("w:rPr/w:sz", ns).get(w + "val"), size)
+            self.assertEqual(style.find("w:rPr/w:szCs", ns).get(w + "val"), size)
+        normalweb = styles["NormalWeb"]
+        self.assertEqual(normalweb.find("w:name", ns).get(w + "val"), "Normal (Web)")
+        self.assertEqual(normalweb.find("w:rPr/w:sz", ns).get(w + "val"), "24")
+        strong = styles["Strong"]
+        self.assertEqual(strong.get(w + "type"), "character")
+        self.assertEqual(strong.find("w:name", ns).get(w + "val"), "Strong")
+        self.assertIsNotNone(strong.find("w:rPr/w:b", ns))
+        for removed in ("Title", "Label"):
+            self.assertNotIn(removed, styles)
+
+    def test_rejects_list_outside_chapter_6(self):
+        data = fixture()
+        data["paragraphs"].append({"kind": "list", "text": "游离列表项？"})
+        with self.assertRaisesRegex(ValueError, "编号列表只能用于第 6 章"):
+            renderer.validate(data)
+
+    def test_rejects_wrong_list_count_and_noncontiguous(self):
+        data = fixture()
+        self.assertEqual(sum(p["kind"] == "list" for p in data["paragraphs"]), 7)
+
+        data6 = fixture()
+        data6["paragraphs"].remove(next(
+            p for p in data6["paragraphs"]
+            if p["kind"] == "list" and p["text"] == "示例问题7？"))
+        with self.assertRaisesRegex(ValueError, "7 个连续"):
+            renderer.validate(data6)
+
+        data8 = fixture()
+        first = next(i for i, p in enumerate(data8["paragraphs"]) if p["kind"] == "list")
+        data8["paragraphs"].insert(first, {"kind": "list", "text": "额外示例问题？"})
+        with self.assertRaisesRegex(ValueError, "7 个连续"):
+            renderer.validate(data8)
+
+        datanc = fixture()
+        items = [i for i, p in enumerate(datanc["paragraphs"]) if p["kind"] == "list"]
+        datanc["paragraphs"].insert(items[3], {"kind": "text", "text": "插入的说明。"})
+        with self.assertRaisesRegex(ValueError, "7 个连续"):
+            renderer.validate(datanc)
+
+    def test_rejects_label_and_manual_number_in_chapter_6(self):
+        data = fixture()
+        first = next(i for i, p in enumerate(data["paragraphs"]) if p["kind"] == "list")
+        data["paragraphs"].insert(first, {"kind": "label", "text": "产品概述 (Product Overview)："})
+        with self.assertRaisesRegex(ValueError, "不使用资料要点标题"):
+            renderer.validate(data)
+
+        data = fixture()
+        next(p for p in data["paragraphs"] if p["kind"] == "list")["text"] = "1. 手写编号问题？"
+        with self.assertRaisesRegex(ValueError, "不要手写编号"):
+            renderer.validate(data)
+
+    def test_render_list_items_use_word_numbering(self):
+        paragraphs = renderer.validate(fixture())
+        with zipfile.ZipFile(io.BytesIO(renderer.render(paragraphs))) as z:
+            xml = ET.fromstring(z.read("word/document.xml"))
+            numbering = ET.fromstring(z.read("word/numbering.xml"))
+            content_types = ET.fromstring(z.read("[Content_Types].xml"))
+            doc_rels = ET.fromstring(z.read("word/_rels/document.xml.rels"))
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        w = "{%s}" % ns["w"]
+        body_ps = xml.findall(".//w:body/w:p", ns)
+        self.assertEqual(len(body_ps), len(paragraphs))
+        seen = 0
+        for p_el, p in zip(body_ps, paragraphs):
+            if p["kind"] != "list":
+                continue
+            seen += 1
+            self.assertIsNone(p_el.find("w:pPr/w:pStyle", ns))
+            numpr = p_el.find("w:pPr/w:numPr", ns)
+            self.assertIsNotNone(numpr)
+            self.assertEqual(numpr.find("w:ilvl", ns).get(w + "val"), "0")
+            self.assertEqual(numpr.find("w:numId", ns).get(w + "val"), "1")
+        self.assertEqual(seen, 7)
+
+        abstract = numbering.find("w:abstractNum", ns)
+        self.assertEqual(abstract.get(w + "abstractNumId"), "0")
+        self.assertEqual(abstract.find("w:multiLevelType", ns).get(w + "val"), "singleLevel")
+        lvl = abstract.find("w:lvl", ns)
+        self.assertEqual(lvl.find("w:start", ns).get(w + "val"), "1")
+        self.assertEqual(lvl.find("w:numFmt", ns).get(w + "val"), "decimal")
+        self.assertEqual(lvl.find("w:lvlText", ns).get(w + "val"), "%1.")
+        num = numbering.find("w:num", ns)
+        self.assertEqual(num.get(w + "numId"), "1")
+        self.assertEqual(num.find("w:abstractNumId", ns).get(w + "val"), "0")
+
+        ct_ns = "http://schemas.openxmlformats.org/package/2006/content-types"
+        overrides = {o.get("PartName"): o.get("ContentType")
+                     for o in content_types.findall(f"{{{ct_ns}}}Override")}
+        self.assertEqual(overrides.get("/word/numbering.xml"),
+                         "application/vnd.openxmlformats-officedocument."
+                         "wordprocessingml.numbering+xml")
+        rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+        rels = {r.get("Id"): r for r in doc_rels.findall(f"{{{rel_ns}}}Relationship")}
+        self.assertTrue(rels["rId2"].get("Type").endswith("/relationships/numbering"))
+        self.assertEqual(rels["rId2"].get("Target"), "numbering.xml")
 
 
 if __name__ == "__main__":
